@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RAG 文档问答助手</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel-2:#1e222b; --line:#2a2f3a;
+    --text:#e6e8ee; --muted:#9aa3b2; --accent:#4f8cff; --accent-2:#2f6fe0;
+    --ok:#3ecf8e; --warn:#f5a623; --err:#ff5c5c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:15px/1.65 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:920px;margin:0 auto;padding:28px 20px 64px}
+  h1{font-size:22px;margin:0 0 6px;letter-spacing:.5px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:22px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
+  .drop{border:1.5px dashed var(--line);border-radius:12px;padding:26px;text-align:center;
+        color:var(--muted);cursor:pointer;transition:.2s}
+  .drop:hover,.drop.over{border-color:var(--accent);color:var(--text);background:var(--panel-2)}
+  .row{display:flex;gap:10px;align-items:center}
+  textarea{width:100%;min-height:82px;resize:vertical;background:var(--panel-2);color:var(--text);
+           border:1px solid var(--line);border-radius:10px;padding:12px;font:inherit;outline:none}
+  textarea:focus{border-color:var(--accent)}
+  button{background:var(--accent);color:#fff;border:0;border-radius:10px;padding:11px 20px;
+         font:inherit;font-weight:600;cursor:pointer;transition:.15s;white-space:nowrap}
+  button:hover{background:var(--accent-2)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--muted);font-weight:500}
+  button.ghost:hover{border-color:var(--accent);color:var(--text);background:transparent}
+  .status{font-size:13px;color:var(--muted);margin-top:10px;min-height:20px}
+  .status .ok{color:var(--ok)} .status .warn{color:var(--warn)} .status .err{color:var(--err)}
+  .badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;font-size:12px}
+  .badge{background:var(--panel-2);border:1px solid var(--line);border-radius:999px;padding:3px 10px;color:var(--muted)}
+  .answer{white-space:pre-wrap;font-size:15.5px;line-height:1.75}
+  .answer.nomatch{color:var(--warn)}
+  .sources{margin-top:6px}
+  details{background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:8px}
+  details summary{cursor:pointer;color:var(--muted);font-size:13.5px;outline:none}
+  details summary b{color:var(--text)}
+  details p{margin:10px 0 0;color:var(--text);font-size:13.5px;white-space:pre-wrap;
+            border-left:2px solid var(--accent);padding-left:10px;opacity:.92}
+  .muted{color:var(--muted);font-size:13px}
+  .spinner{display:inline-block;width:13px;height:13px;border:2px solid var(--line);
+           border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;vertical-align:-2px;margin-right:6px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .hide{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>RAG 文档问答助手</h1>
+  <div class="sub">上传一份可复制文字的 PDF → 提问 → 基于文档内容回答，并给出页码与原文引用</div>
+
+  <!-- 上传 -->
+  <div class="card">
+    <div id="drop" class="drop">
+      <div><b>点击选择</b> 或把 PDF 拖到这里</div>
+      <div style="font-size:12.5px;margin-top:6px">仅支持可提取文字的 PDF（扫描件不支持 OCR），最大 25MB</div>
+    </div>
+    <input id="file" type="file" accept="application/pdf,.pdf" class="hide" />
+    <div id="uploadStatus" class="status"></div>
+    <div id="badges" class="badges"></div>
+  </div>
+
+  <!-- 提问 -->
+  <div class="card">
+    <textarea id="question" placeholder="例如：这份文档里 XXX 是怎么配置的？"></textarea>
+    <div class="row" style="margin-top:12px;justify-content:space-between">
+      <div class="muted" id="hint">Ctrl / ⌘ + Enter 快速提问</div>
+      <div class="row">
+        <button class="ghost" id="resetBtn" type="button">清空文档</button>
+        <button id="askBtn" type="button">提问</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 回答 -->
+  <div class="card hide" id="answerCard">
+    <div class="muted" style="margin-bottom:8px">回答</div>
+    <div id="answer" class="answer"></div>
+    <div id="sourcesWrap" class="sources"></div>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const drop = $('#drop'), fileInput = $('#file');
+const uploadStatus = $('#uploadStatus'), badges = $('#badges');
+const askBtn = $('#askBtn'), resetBtn = $('#resetBtn'), questionEl = $('#question');
+const answerCard = $('#answerCard'), answerEl = $('#answer'), sourcesWrap = $('#sourcesWrap');
+
+let ready = false;
+
+function setStatus(el, html){ el.innerHTML = html; }
+
+async function refreshStatus(){
+  try{
+    const s = await (await fetch('/api/status')).json();
+    badges.innerHTML = '';
+    const items = [
+      ['文档', s.doc_name || '未上传'],
+      ['分片', String(s.chunks || 0)],
+      ['向量化', s.embedder || '-'],
+      ['向量库', s.store || '-'],
+      ['模型', s.llm_configured ? s.llm_model : '未配置（抽取式兜底）'],
+    ];
+    for (const [k,v] of items){
+      const b = document.createElement('span');
+      b.className = 'badge';
+      b.textContent = `${k}: ${v}`;
+      badges.appendChild(b);
+    }
+    ready = (s.chunks || 0) > 0;
+    if(!ready){
+      setStatus(uploadStatus, '<span class="muted">还没有可用文档，请先上传 PDF。</span>');
+    }
+    return s;
+  }catch(e){ /* 忽略 */ }
+}
+
+async function upload(file){
+  if(!file) return;
+  if(!/\.pdf$/i.test(file.name)){ setStatus(uploadStatus, '<span class="err">只支持 PDF 文件</span>'); return; }
+  askBtn.disabled = true;
+  setStatus(uploadStatus, `<span class="spinner"></span>正在解析并入库：${file.name}（${(file.size/1024/1024).toFixed(1)}MB）`);
+  const fd = new FormData();
+  fd.append('file', file);
+  try{
+    const r = await fetch('/api/upload', {method:'POST', body: fd});
+    const data = await r.json();
+    if(!r.ok) throw new Error(data.detail || '上传失败');
+    setStatus(uploadStatus,
+      `<span class="ok">✔ 入库成功</span> · ${data.doc_name} · ${data.pages} 页 → ${data.chunks} 个分片 · 用时 ${data.elapsed_ms}ms`);
+    await refreshStatus();
+  }catch(e){
+    setStatus(uploadStatus, `<span class="err">✘ ${e.message}</span>`);
+  }finally{
+    askBtn.disabled = false;
+    fileInput.value = '';
+  }
+}
+
+async function ask(){
+  const question = questionEl.value.trim();
+  if(!question){ questionEl.focus(); return; }
+  if(!ready){ setStatus(uploadStatus, '<span class="warn">请先上传 PDF 文档</span>'); return; }
+  askBtn.disabled = true;
+  answerCard.classList.remove('hide');
+  answerEl.classList.remove('nomatch');
+  answerEl.innerHTML = '<span class="spinner"></span>检索并生成中…';
+  sourcesWrap.innerHTML = '';
+  try{
+    const r = await fetch('/api/query', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({question})
+    });
+    const data = await r.json();
+    if(!r.ok) throw new Error(data.detail || '问答失败');
+    if(!data.sources || data.sources.length === 0){
+      answerEl.classList.add('nomatch');
+    }
+    answerEl.textContent = data.answer;
+    if(data.sources && data.sources.length){
+      const title = document.createElement('div');
+      title.className = 'muted';
+      title.style.margin = '14px 0 2px';
+      title.textContent = `引用来源（${data.sources.length} 条）`;
+      sourcesWrap.appendChild(title);
+      data.sources.forEach((s, i) => {
+        const d = document.createElement('details');
+        const sum = document.createElement('summary');
+        sum.innerHTML = `第 <b>${s.page}</b> 页 · 相似度 ${s.score} · 展开原文`;
+        const p = document.createElement('p');
+        p.textContent = s.text;
+        d.appendChild(sum); d.appendChild(p);
+        sourcesWrap.appendChild(d);
+        if(i === 0) d.open = true;
+      });
+    }
+  }catch(e){
+    answerEl.classList.add('nomatch');
+    answerEl.textContent = '✘ ' + e.message;
+  }finally{
+    askBtn.disabled = false;
+  }
+}
+
+drop.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', (e) => upload(e.target.files[0]));
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, (e)=>{e.preventDefault();drop.classList.add('over');}));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, (e)=>{e.preventDefault();drop.classList.remove('over');}));
+drop.addEventListener('drop', (e) => upload(e.dataTransfer.files[0]));
+askBtn.addEventListener('click', ask);
+resetBtn.addEventListener('click', async () => {
+  await fetch('/api/reset', {method:'POST'});
+  answerCard.classList.add('hide');
+  setStatus(uploadStatus, '<span class="muted">已清空文档，请重新上传。</span>');
+  await refreshStatus();
+});
+questionEl.addEventListener('keydown', (e) => {
+  if((e.ctrlKey || e.metaKey) && e.key === 'Enter') ask();
+});
+
+refreshStatus();
+</script>
+</body>
+</html>

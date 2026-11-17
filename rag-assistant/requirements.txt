@@ -1,0 +1,12 @@
+# 必需
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+pymupdf>=1.24
+numpy>=1.26
+openai>=1.30
+jieba>=0.42
+python-dotenv>=1.0
+
+# 向量库（装了就用 Chroma；装不上会自动退回内置 numpy 向量库）
+chromadb>=0.4.24
